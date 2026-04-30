@@ -10,6 +10,7 @@ import { defaultLabelTemplate, renderLabel } from '@/lib/labelTemplate';
 import { db } from '@/lib/db';
 import { geocodeWithCache } from '@/lib/geocodeCache';
 import { useProjectStore } from '@/store/useProjectStore';
+import { PinPopup } from '@/components/PinPopup';
 import type { ColumnDef, ColumnRole, ImportTemplate, Stop, ThemeTokens } from '@/types';
 
 const ROLES: ColumnRole[] = [
@@ -51,6 +52,13 @@ interface PreviewGeo {
   lng: number;
 }
 
+type UnresolvedAction = 'edit' | 'remove' | 'keep';
+
+interface UnresolvedChoice {
+  action: UnresolvedAction;
+  editedAddress: string;
+}
+
 interface ImportWizardProps {
   theme: ThemeTokens;
   file: File;
@@ -69,16 +77,25 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
   const [rows, setRows] = useState<Record<string, string>[]>([]);
   const [duplicatesRenamed, setDuplicatesRenamed] = useState<string[]>([]);
   const [schema, setSchema] = useState<ColumnDef[]>([]);
+  const [selectedColumns, setSelectedColumns] = useState<Set<string>>(new Set());
+  const [selectedRowIndices, setSelectedRowIndices] = useState<Set<number>>(new Set());
   const [labelTemplate, setLabelTemplate] = useState('');
   const [previewGeos, setPreviewGeos] = useState<PreviewGeo[] | null>(null);
+  const [unresolvedChoices, setUnresolvedChoices] = useState<Record<number, UnresolvedChoice>>({});
   const [geocoding, setGeocoding] = useState(false);
   const [previewStarted, setPreviewStarted] = useState(false);
   const [importing, setImporting] = useState(false);
   const [matchedTemplate, setMatchedTemplate] = useState<ImportTemplate | null>(null);
   const [templateName, setTemplateName] = useState('');
 
-  const sampleRows = useMemo(() => rows.slice(0, 5), [rows]);
-  const previewRowCount = sampleRows.length;
+  const selectedSchema = useMemo(
+    () => schema.filter((col) => selectedColumns.has(col.name)),
+    [schema, selectedColumns],
+  );
+  const selectedRowList = useMemo(
+    () => [...selectedRowIndices].sort((a, b) => a - b),
+    [selectedRowIndices],
+  );
 
   // Parse CSV on mount
   useEffect(() => {
@@ -89,6 +106,8 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
         setHeaders(res.headers);
         setRows(res.rows);
         setDuplicatesRenamed(res.duplicatesRenamed);
+        setSelectedColumns(new Set(res.headers));
+        setSelectedRowIndices(new Set(res.rows.map((_, idx) => idx)));
 
         const sig = headerSignature(res.headers);
         db.importTemplates
@@ -117,9 +136,13 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
     };
   }, [file]);
 
-  // Geocode preview when entering step 4
   useEffect(() => {
-    if (step !== 4) {
+    setUnresolvedChoices({});
+  }, [step, selectedRowIndices, selectedSchema]);
+
+  // Geocode preview when entering step 3
+  useEffect(() => {
+    if (step !== 3) {
       setPreviewStarted(false);
       return;
     }
@@ -130,14 +153,14 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
 
     async function runPreview() {
       const out: PreviewGeo[] = [];
-      for (let i = 0; i < sampleRows.length; i++) {
-        const row = sampleRows[i];
+      for (const rowIndex of selectedRowList) {
+        const row = rows[rowIndex];
         if (!row) continue;
-        const addr = buildComposedAddress(row, schema);
+        const addr = buildComposedAddress(row, selectedSchema);
         try {
           const r = await geocodeWithCache(addr, token);
           out.push({
-            rowIndex: i,
+            rowIndex,
             ok: r.status === 'ok',
             status: r.status,
             confidence: r.confidence,
@@ -149,7 +172,7 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           out.push({
-            rowIndex: i,
+            rowIndex,
             ok: false,
             status: 'failed',
             confidence: 0,
@@ -161,9 +184,16 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
         }
       }
       setPreviewGeos(out);
+      const nextChoices: Record<number, UnresolvedChoice> = {};
+      out
+        .filter((g) => g.status !== 'ok')
+        .forEach((g) => {
+          nextChoices[g.rowIndex] = { action: 'keep', editedAddress: g.composedAddress };
+        });
+      setUnresolvedChoices(nextChoices);
       setGeocoding(false);
     }
-  }, [step, previewStarted, sampleRows, schema, token]);
+  }, [rows, step, previewStarted, selectedRowList, selectedSchema, token]);
 
   const finalize = async (alsoSaveTemplate: boolean): Promise<void> => {
     setImporting(true);
@@ -183,12 +213,45 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
       previewGeos?.forEach((g) => previewLookup.set(g.rowIndex, g));
 
       const stops: Stop[] = [];
+      let importedCount = 0;
       for (let i = 0; i < rows.length; i++) {
+        if (!selectedRowIndices.has(i)) continue;
         const row = rows[i];
         if (!row) continue;
+        const unresolvedChoice = unresolvedChoices[i];
+        if (unresolvedChoice?.action === 'remove') continue;
         let geo = previewLookup.get(i);
+        if (unresolvedChoice?.action === 'edit') {
+          const editedAddress = unresolvedChoice.editedAddress.trim();
+          if (!editedAddress) continue;
+          try {
+            const r = await geocodeWithCache(editedAddress, token);
+            geo = {
+              rowIndex: i,
+              ok: r.status === 'ok',
+              status: r.status,
+              confidence: r.confidence,
+              composedAddress: editedAddress,
+              ...(r.reason !== undefined ? { reason: r.reason } : {}),
+              lat: r.lat,
+              lng: r.lng,
+            };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            geo = {
+              rowIndex: i,
+              ok: false,
+              status: 'failed',
+              confidence: 0,
+              composedAddress: editedAddress,
+              reason: msg,
+              lat: 0,
+              lng: 0,
+            };
+          }
+        }
         if (!geo) {
-          const addr = buildComposedAddress(row, schema);
+          const addr = buildComposedAddress(row, selectedSchema);
           try {
             const r = await geocodeWithCache(addr, token);
             geo = {
@@ -217,7 +280,7 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
         }
         const stop = makeStopFromRow(
           row,
-          schema,
+          selectedSchema,
           {
             lat: geo.lat,
             lng: geo.lng,
@@ -225,14 +288,15 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
             confidence: geo.confidence,
             ...(geo.reason !== undefined ? { reason: geo.reason } : {}),
           },
-          `stop-${proj.id}-${i + 1}`,
+          `stop-${proj.id}-${importedCount + 1}`,
         );
+        importedCount += 1;
         stops.push(stop);
       }
 
       const updated = {
         ...proj,
-        column_schema: schema,
+        column_schema: selectedSchema,
         label_template: labelTemplate,
         stops,
         updated_at: new Date().toISOString(),
@@ -245,7 +309,7 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
           name: templateName.trim(),
           created_at: matchedTemplate?.created_at ?? new Date().toISOString(),
           header_signature: headerSignature(headers),
-          column_schema: schema,
+          column_schema: selectedSchema,
           label_template: labelTemplate,
         };
         await db.importTemplates.put(tmpl);
@@ -257,7 +321,14 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
     }
   };
 
-  const stepNames = ['Upload', 'Map Columns', 'Label', 'Preview', 'Template'];
+  const stepNames = ['Upload', 'Select Data', 'Preview', 'Template'];
+  const unresolvedWithEditErrors = Object.values(unresolvedChoices).some(
+    (choice) => choice.action === 'edit' && !choice.editedAddress.trim(),
+  );
+  const selectedCountAfterPreviewRemovals =
+    step === 3
+      ? selectedRowList.filter((idx) => unresolvedChoices[idx]?.action !== 'remove').length
+      : selectedRowIndices.size;
 
   return (
     <div
@@ -388,36 +459,41 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
             <Step1Upload
               theme={theme}
               headers={headers}
-              rows={sampleRows}
+              rows={rows.slice(0, 5)}
+              rowCount={rows.length}
               duplicatesRenamed={duplicatesRenamed}
               matchedTemplate={matchedTemplate}
             />
           )}
           {!parseError && step === 2 && (
-            <Step2Mapping theme={theme} schema={schema} onChange={setSchema} />
-          )}
-          {!parseError && step === 3 && (
-            <Step3Label
+            <Step2SelectData
               theme={theme}
               schema={schema}
+              selectedColumns={selectedColumns}
+              onSelectedColumnsChange={setSelectedColumns}
+              selectedRowIndices={selectedRowIndices}
+              onSelectedRowIndicesChange={setSelectedRowIndices}
+              rows={rows}
+              onSchemaChange={setSchema}
               labelTemplate={labelTemplate}
               setLabelTemplate={setLabelTemplate}
-              sampleRows={sampleRows}
+            />
+          )}
+          {!parseError && step === 3 && (
+            <Step3Preview
+              theme={theme}
+              previewRowCount={selectedRowIndices.size}
+              geocoding={geocoding}
+              previewGeos={previewGeos}
+              schema={selectedSchema}
+              labelTemplate={labelTemplate}
+              rows={rows}
+              unresolvedChoices={unresolvedChoices}
+              onUnresolvedChoicesChange={setUnresolvedChoices}
             />
           )}
           {!parseError && step === 4 && (
-            <Step4Preview
-              theme={theme}
-              previewRowCount={previewRowCount}
-              geocoding={geocoding}
-              previewGeos={previewGeos}
-              schema={schema}
-              labelTemplate={labelTemplate}
-              sampleRows={sampleRows}
-            />
-          )}
-          {!parseError && step === 5 && (
-            <Step5Template
+            <Step4Template
               theme={theme}
               templateName={templateName}
               setTemplateName={setTemplateName}
@@ -450,7 +526,7 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
           </button>
 
           <div className="flex items-center gap-2">
-            {step === 5 && (
+            {step === 4 && (
               <button
                 type="button"
                 onClick={() => void finalize(false)}
@@ -473,8 +549,17 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
               type="button"
               onClick={() => {
                 if (parseError) return;
-                if (step === 4 && (geocoding || !previewGeos)) return;
-                if (step === 5) {
+                if (step === 2 && selectedColumns.size === 0) return;
+                if (step === 2 && selectedRowIndices.size === 0) return;
+                if (
+                  step === 3 &&
+                  (geocoding ||
+                    !previewGeos ||
+                    unresolvedWithEditErrors ||
+                    selectedCountAfterPreviewRemovals === 0)
+                )
+                  return;
+                if (step === 4) {
                   void finalize(Boolean(templateName.trim()));
                   return;
                 }
@@ -483,7 +568,13 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
               disabled={
                 importing ||
                 Boolean(parseError) ||
-                (step === 4 && (geocoding || !previewGeos))
+                (step === 2 && selectedColumns.size === 0) ||
+                (step === 2 && selectedRowIndices.size === 0) ||
+                (step === 3 &&
+                  (geocoding ||
+                    !previewGeos ||
+                    unresolvedWithEditErrors ||
+                    selectedCountAfterPreviewRemovals === 0))
               }
               style={{
                 padding: '8px 20px',
@@ -491,22 +582,32 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
                 fontWeight: 600,
                 color: '#fff',
                 background:
-                  importing || (step === 4 && (geocoding || !previewGeos))
+                  importing ||
+                  (step === 3 &&
+                    (geocoding ||
+                      !previewGeos ||
+                      unresolvedWithEditErrors ||
+                      selectedCountAfterPreviewRemovals === 0))
                     ? theme.textTertiary
                     : theme.accent,
                 border: 'none',
                 borderRadius: 6,
                 cursor:
-                  importing || (step === 4 && (geocoding || !previewGeos))
+                  importing ||
+                  (step === 3 &&
+                    (geocoding ||
+                      !previewGeos ||
+                      unresolvedWithEditErrors ||
+                      selectedCountAfterPreviewRemovals === 0))
                     ? 'not-allowed'
                     : 'pointer',
               }}
             >
               {importing
                 ? 'Importing…'
-                : step === 5
+                : step === 4
                   ? 'Save & Finish'
-                  : step === 4
+                  : step === 3
                     ? 'Looks good →'
                     : 'Continue →'}
             </button>
@@ -522,12 +623,14 @@ function Step1Upload({
   theme,
   headers,
   rows,
+  rowCount,
   duplicatesRenamed,
   matchedTemplate,
 }: {
   theme: ThemeTokens;
   headers: string[];
   rows: Record<string, string>[];
+  rowCount: number;
   duplicatesRenamed: string[];
   matchedTemplate: ImportTemplate | null;
 }) {
@@ -542,7 +645,7 @@ function Step1Upload({
           marginTop: 0,
         }}
       >
-        CSV parsed successfully. Detected {rows.length > 0 ? `${rows.length}+` : '0'}{' '}
+        CSV parsed successfully. Detected {rowCount}{' '}
         rows and {headers.length} columns.
         {duplicatesRenamed.length > 0
           ? ` ${duplicatesRenamed.length} duplicate column header${
@@ -629,79 +732,132 @@ function Step1Upload({
   );
 }
 
-// ── Step 2: Column mapping ──────────────────────────────────────────────────
-function Step2Mapping({
+// ── Step 2: Select rows/columns and label preview ───────────────────────────
+function Step2SelectData({
   theme,
   schema,
-  onChange,
+  selectedColumns,
+  onSelectedColumnsChange,
+  selectedRowIndices,
+  onSelectedRowIndicesChange,
+  rows,
+  onSchemaChange,
+  labelTemplate,
+  setLabelTemplate,
 }: {
   theme: ThemeTokens;
   schema: ColumnDef[];
-  onChange: (next: ColumnDef[]) => void;
+  selectedColumns: Set<string>;
+  onSelectedColumnsChange: (next: Set<string>) => void;
+  selectedRowIndices: Set<number>;
+  onSelectedRowIndicesChange: (next: Set<number>) => void;
+  rows: Record<string, string>[];
+  onSchemaChange: (next: ColumnDef[]) => void;
+  labelTemplate: string;
+  setLabelTemplate: (s: string) => void;
 }) {
+  const visibleRows = rows.slice(0, 80);
+  const selectedSchema = useMemo(
+    () => schema.filter((col) => selectedColumns.has(col.name)),
+    [schema, selectedColumns],
+  );
+  const previewRowIndices = useMemo(
+    () => [...selectedRowIndices].sort((a, b) => a - b),
+    [selectedRowIndices],
+  );
+  const [previewCursor, setPreviewCursor] = useState(0);
+
+  useEffect(() => {
+    if (previewRowIndices.length === 0) {
+      setPreviewCursor(0);
+      return;
+    }
+    if (previewCursor > previewRowIndices.length - 1) {
+      setPreviewCursor(previewRowIndices.length - 1);
+    }
+  }, [previewCursor, previewRowIndices]);
+
+  const previewRowIndex = previewRowIndices[previewCursor];
+  const previewRow = previewRowIndex !== undefined ? rows[previewRowIndex] : undefined;
+  const previewStop =
+    previewRow && previewRowIndex !== undefined
+      ? makeStopFromRow(
+          previewRow,
+          selectedSchema,
+          {
+            lat: 0,
+            lng: 0,
+            status: 'ok',
+            confidence: 1,
+          },
+          `preview-row-${previewRowIndex}`,
+        )
+      : null;
+
+  const toggleColumn = (name: string, checked: boolean) => {
+    const next = new Set(selectedColumns);
+    if (checked) next.add(name);
+    else next.delete(name);
+    onSelectedColumnsChange(next);
+  };
+  const toggleRow = (rowIndex: number, checked: boolean) => {
+    const next = new Set(selectedRowIndices);
+    if (checked) next.add(rowIndex);
+    else next.delete(rowIndex);
+    onSelectedRowIndicesChange(next);
+  };
+
+  const allColumnsSelected = schema.length > 0 && schema.every((col) => selectedColumns.has(col.name));
+  const selectAllRows = () => {
+    onSelectedRowIndicesChange(new Set(rows.map((_, idx) => idx)));
+  };
+  const deselectAllRows = () => {
+    onSelectedRowIndicesChange(new Set());
+  };
+
   return (
-    <div>
-      <p
-        style={{
-          fontSize: 13,
-          color: theme.textSecondary,
-          marginBottom: 14,
-          marginTop: 0,
-        }}
-      >
-        Auto-detected column roles below. Confirm or adjust as needed. Sensitive
-        columns (PII) are never sent to the geocoder.
+    <div className="flex flex-col gap-4">
+      <p style={{ fontSize: 13, color: theme.textSecondary, margin: 0 }}>
+        Choose the columns and rows to import, then confirm the pin popup preview before moving
+        on.
       </p>
-      <div
-        style={{
-          border: `1px solid ${theme.border}`,
-          borderRadius: 6,
-          overflow: 'hidden',
-        }}
-      >
+
+      <div style={{ border: `1px solid ${theme.border}`, borderRadius: 6, overflow: 'hidden' }}>
         <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 180px',
-            background: theme.sidebar,
-            borderBottom: `1px solid ${theme.border}`,
-          }}
+          className="flex items-center justify-between"
+          style={{ background: theme.sidebar, borderBottom: `1px solid ${theme.border}`, padding: '7px 12px' }}
         >
-          <div
-            style={{
-              padding: '7px 12px',
-              fontSize: 11,
-              fontWeight: 600,
-              color: theme.textTertiary,
-              textTransform: 'uppercase',
-              letterSpacing: '0.05em',
-            }}
-          >
-            Column
+          <div style={{ fontSize: 12, color: theme.textSecondary, fontWeight: 600 }}>
+            Columns ({selectedColumns.size}/{schema.length} selected)
           </div>
-          <div
-            style={{
-              padding: '7px 12px',
-              fontSize: 11,
-              fontWeight: 600,
-              color: theme.textTertiary,
-              textTransform: 'uppercase',
-              letterSpacing: '0.05em',
-            }}
-          >
-            Role
-          </div>
+          <label className="flex items-center gap-1.5" style={{ fontSize: 12, color: theme.textSecondary }}>
+            <input
+              type="checkbox"
+              checked={allColumnsSelected}
+              onChange={(e) =>
+                onSelectedColumnsChange(e.target.checked ? new Set(schema.map((col) => col.name)) : new Set())
+              }
+            />
+            Select all
+          </label>
         </div>
         {schema.map((col, idx) => (
           <div
             key={col.name}
             style={{
               display: 'grid',
-              gridTemplateColumns: '1fr 180px',
+              gridTemplateColumns: '28px 1fr 180px',
               borderBottom: idx < schema.length - 1 ? `1px solid ${theme.border}` : 'none',
-              background: col.role === 'ignore' ? theme.sidebar : 'transparent',
+              background: selectedColumns.has(col.name) ? 'transparent' : theme.sidebar,
             }}
           >
+            <div className="flex items-center justify-center">
+              <input
+                type="checkbox"
+                checked={selectedColumns.has(col.name)}
+                onChange={(e) => toggleColumn(col.name, e.target.checked)}
+              />
+            </div>
             <div className="flex items-center gap-1.5" style={{ padding: '7px 12px' }}>
               {col.sensitive && (
                 <span
@@ -721,7 +877,7 @@ function Step2Mapping({
                 title={col.name}
                 style={{
                   fontSize: 13,
-                  color: col.role === 'ignore' ? theme.textTertiary : theme.textPrimary,
+                  color: selectedColumns.has(col.name) ? theme.textPrimary : theme.textTertiary,
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
@@ -736,7 +892,7 @@ function Step2Mapping({
                 onChange={(e) => {
                   const role = e.target.value as ColumnRole;
                   const next = schema.map((c, i) => (i === idx ? { ...c, role } : c));
-                  onChange(next);
+                  onSchemaChange(next);
                 }}
                 style={{
                   width: '100%',
@@ -759,69 +915,148 @@ function Step2Mapping({
           </div>
         ))}
       </div>
-    </div>
-  );
-}
 
-// ── Step 3: Label template ──────────────────────────────────────────────────
-function Step3Label({
-  theme,
-  schema,
-  labelTemplate,
-  setLabelTemplate,
-  sampleRows,
-}: {
-  theme: ThemeTokens;
-  schema: ColumnDef[];
-  labelTemplate: string;
-  setLabelTemplate: (s: string) => void;
-  sampleRows: Record<string, string>[];
-}) {
-  return (
-    <div>
-      <p
-        style={{
-          fontSize: 13,
-          color: theme.textSecondary,
-          marginBottom: 16,
-          marginTop: 0,
-        }}
-      >
-        The label template defines what appears as the pin title on the map. Use{' '}
-        <code style={codeChip(theme)}>{'{Column Name}'}</code> placeholders.
-      </p>
-      <label
-        style={{
-          fontSize: 13,
-          fontWeight: 500,
-          color: theme.textPrimary,
-          display: 'block',
-          marginBottom: 8,
-        }}
-      >
-        Label template
-      </label>
-      <input
-        value={labelTemplate}
-        onChange={(e) => setLabelTemplate(e.target.value)}
-        style={{
-          width: '100%',
-          padding: '9px 12px',
-          fontSize: 14,
-          border: `1px solid ${theme.accent}`,
-          borderRadius: 6,
-          background: theme.inputBg,
-          color: theme.textPrimary,
-          outline: 'none',
-        }}
-      />
-      <div style={{ marginTop: 14 }}>
-        <div style={{ fontSize: 12, color: theme.textTertiary, marginBottom: 6 }}>
-          Available columns — click to insert
+      <div style={{ border: `1px solid ${theme.border}`, borderRadius: 6, overflow: 'hidden' }}>
+        <div
+          className="flex items-center justify-between"
+          style={{ background: theme.sidebar, borderBottom: `1px solid ${theme.border}`, padding: '7px 12px' }}
+        >
+          <div style={{ fontSize: 12, color: theme.textSecondary, fontWeight: 600 }}>
+            Rows ({selectedRowIndices.size}/{rows.length} selected)
+          </div>
+          <div className="flex items-center gap-1.5" style={{ fontSize: 12 }}>
+            <button
+              type="button"
+              onClick={selectAllRows}
+              style={{
+                padding: '2px 8px',
+                fontSize: 12,
+                color: theme.textSecondary,
+                background: 'transparent',
+                border: `1px solid ${theme.border}`,
+                borderRadius: 4,
+                cursor: 'pointer',
+              }}
+            >
+              Select all
+            </button>
+            <button
+              type="button"
+              onClick={deselectAllRows}
+              style={{
+                padding: '2px 8px',
+                fontSize: 12,
+                color: theme.textSecondary,
+                background: 'transparent',
+                border: `1px solid ${theme.border}`,
+                borderRadius: 4,
+                cursor: 'pointer',
+              }}
+            >
+              Deselect all
+            </button>
+          </div>
         </div>
-        <div className="flex flex-wrap gap-1.5">
+        <div style={{ maxHeight: 220, overflow: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: theme.sidebar }}>
+                <th style={{ width: 34, borderBottom: `1px solid ${theme.border}` }} />
+                <th
+                  style={{
+                    textAlign: 'left',
+                    fontWeight: 600,
+                    color: theme.textTertiary,
+                    padding: '6px 8px',
+                    borderBottom: `1px solid ${theme.border}`,
+                  }}
+                >
+                  Row
+                </th>
+                {schema
+                  .filter((col) => selectedColumns.has(col.name))
+                  .slice(0, 4)
+                  .map((col) => (
+                    <th
+                      key={col.name}
+                      style={{
+                        textAlign: 'left',
+                        fontWeight: 600,
+                        color: theme.textTertiary,
+                        padding: '6px 8px',
+                        borderBottom: `1px solid ${theme.border}`,
+                      }}
+                    >
+                      {col.name}
+                    </th>
+                  ))}
+              </tr>
+            </thead>
+            <tbody>
+              {visibleRows.map((row, idx) => (
+                <tr key={idx} style={{ borderBottom: `1px solid ${theme.border}` }}>
+                  <td style={{ textAlign: 'center' }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedRowIndices.has(idx)}
+                      onChange={(e) => toggleRow(idx, e.target.checked)}
+                    />
+                  </td>
+                  <td style={{ padding: '6px 8px', color: theme.textSecondary }}>{idx + 1}</td>
+                  {schema
+                    .filter((col) => selectedColumns.has(col.name))
+                    .slice(0, 4)
+                    .map((col) => (
+                      <td
+                        key={col.name}
+                        style={{
+                          padding: '6px 8px',
+                          color: theme.textPrimary,
+                          maxWidth: 160,
+                          textOverflow: 'ellipsis',
+                          overflow: 'hidden',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {row[col.name] ?? ''}
+                      </td>
+                    ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div>
+        <label
+          style={{
+            fontSize: 13,
+            fontWeight: 500,
+            color: theme.textPrimary,
+            display: 'block',
+            marginBottom: 8,
+          }}
+        >
+          Label template
+        </label>
+        <input
+          value={labelTemplate}
+          onChange={(e) => setLabelTemplate(e.target.value)}
+          style={{
+            width: '100%',
+            padding: '9px 12px',
+            fontSize: 14,
+            border: `1px solid ${theme.accent}`,
+            borderRadius: 6,
+            background: theme.inputBg,
+            color: theme.textPrimary,
+            outline: 'none',
+          }}
+        />
+        <div className="flex flex-wrap gap-1.5" style={{ marginTop: 8 }}>
           {schema
-            .filter((c) => c.role !== 'ignore')
+            .filter((c) => selectedColumns.has(c.name))
             .map((col) => (
               <button
                 key={col.name}
@@ -842,48 +1077,93 @@ function Step3Label({
             ))}
         </div>
       </div>
-      <div style={{ marginTop: 16 }}>
-        <div style={{ fontSize: 12, color: theme.textTertiary, marginBottom: 8 }}>
-          Preview
-        </div>
-        <div
-          style={{
-            border: `1px solid ${theme.border}`,
-            borderRadius: 6,
-            overflow: 'hidden',
-          }}
-        >
-          {sampleRows.map((row, i) => {
-            const rendered = renderLabel(labelTemplate, row, '(no label)');
-            return (
-              <div
-                key={i}
+
+      <div style={{ border: `1px solid ${theme.border}`, borderRadius: 8, padding: 12 }}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
+          <div style={{ fontSize: 12, color: theme.textTertiary }}>Pin popup preview</div>
+          {previewRowIndices.length > 0 && (
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setPreviewCursor((n) => Math.max(0, n - 1))}
+                disabled={previewCursor === 0}
                 style={{
-                  padding: '8px 12px',
-                  fontSize: 13,
-                  borderBottom: i < sampleRows.length - 1 ? `1px solid ${theme.border}` : 'none',
-                  color: theme.textPrimary,
+                  padding: '2px 8px',
+                  fontSize: 12,
+                  color: previewCursor === 0 ? theme.textTertiary : theme.textSecondary,
+                  background: 'transparent',
+                  border: `1px solid ${theme.border}`,
+                  borderRadius: 4,
+                  cursor: previewCursor === 0 ? 'not-allowed' : 'pointer',
                 }}
               >
-                {rendered || <span style={{ color: theme.textTertiary }}>(empty)</span>}
+                Prev
+              </button>
+              <div style={{ fontSize: 11, color: theme.textTertiary, minWidth: 110, textAlign: 'center' }}>
+                Row {previewRowIndex !== undefined ? previewRowIndex + 1 : 0} ({previewCursor + 1}/{previewRowIndices.length})
               </div>
-            );
-          })}
+              <button
+                type="button"
+                onClick={() =>
+                  setPreviewCursor((n) => Math.min(previewRowIndices.length - 1, n + 1))
+                }
+                disabled={previewCursor >= previewRowIndices.length - 1}
+                style={{
+                  padding: '2px 8px',
+                  fontSize: 12,
+                  color:
+                    previewCursor >= previewRowIndices.length - 1
+                      ? theme.textTertiary
+                      : theme.textSecondary,
+                  background: 'transparent',
+                  border: `1px solid ${theme.border}`,
+                  borderRadius: 4,
+                  cursor:
+                    previewCursor >= previewRowIndices.length - 1 ? 'not-allowed' : 'pointer',
+                }}
+              >
+                Next
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="flex justify-center">
+          {!previewStop && (
+            <div style={{ fontSize: 12, color: theme.textTertiary }}>Select at least one row.</div>
+          )}
+          {previewStop && (
+            <PinPopup
+              theme={theme}
+              stop={previewStop}
+              schema={selectedSchema}
+              labelTemplate={labelTemplate}
+              routes={[]}
+              activeRouteId={null}
+              previewMode
+              onToggleRouteMembership={() => {}}
+              onAddToActiveRoute={() => {}}
+              onDeleteStop={() => {}}
+              onEditStop={() => {}}
+              onClose={() => {}}
+            />
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-// ── Step 4: Geocode preview ─────────────────────────────────────────────────
-function Step4Preview({
+// ── Step 3: Geocode preview ─────────────────────────────────────────────────
+function Step3Preview({
   theme,
   previewRowCount,
   geocoding,
   previewGeos,
   schema,
   labelTemplate,
-  sampleRows,
+  rows,
+  unresolvedChoices,
+  onUnresolvedChoicesChange,
 }: {
   theme: ThemeTokens;
   previewRowCount: number;
@@ -891,7 +1171,9 @@ function Step4Preview({
   previewGeos: PreviewGeo[] | null;
   schema: ColumnDef[];
   labelTemplate: string;
-  sampleRows: Record<string, string>[];
+  rows: Record<string, string>[];
+  unresolvedChoices: Record<number, UnresolvedChoice>;
+  onUnresolvedChoicesChange: (next: Record<number, UnresolvedChoice>) => void;
 }) {
   if (geocoding || !previewGeos) {
     return (
@@ -906,8 +1188,27 @@ function Step4Preview({
       </div>
     );
   }
-  const okCount = previewGeos.filter((g) => g.status === 'ok').length;
-  const issueCount = previewGeos.length - okCount;
+  const successful = previewGeos.filter((g) => g.status === 'ok');
+  const unsuccessful = previewGeos.filter((g) => g.status !== 'ok');
+  const okCount = successful.length;
+  const issueCount = unsuccessful.length;
+  const keptAsIsCount = unsuccessful.filter(
+    (g) => unresolvedChoices[g.rowIndex]?.action === 'keep',
+  ).length;
+  const removedCount = unsuccessful.filter(
+    (g) => unresolvedChoices[g.rowIndex]?.action === 'remove',
+  ).length;
+
+  const updateChoice = (
+    rowIndex: number,
+    updater: (prev: UnresolvedChoice) => UnresolvedChoice,
+  ) => {
+    const current = unresolvedChoices[rowIndex] ?? { action: 'keep', editedAddress: '' };
+    onUnresolvedChoicesChange({
+      ...unresolvedChoices,
+      [rowIndex]: updater(current),
+    });
+  };
 
   return (
     <div>
@@ -924,84 +1225,268 @@ function Step4Preview({
         ✓ {okCount} of {previewGeos.length} geocoded successfully
         {issueCount > 0 ? ` · ${issueCount} need${issueCount === 1 ? 's' : ''} attention` : ''}
       </div>
-      {previewGeos.map((g) => {
-        const row = sampleRows[g.rowIndex];
-        const label = row ? renderLabel(labelTemplate, row, g.composedAddress) : '';
-        return (
+      {issueCount > 0 && (
+        <div
+          style={{
+            border: `1px solid #FCA5A5`,
+            borderRadius: 6,
+            background: '#FFF5F5',
+            marginBottom: 12,
+          }}
+        >
           <div
-            key={g.rowIndex}
-            className="flex items-center gap-3"
             style={{
-              padding: '10px 12px',
-              marginBottom: 6,
-              border: `1px solid ${g.ok ? theme.border : '#FCA5A5'}`,
-              borderRadius: 6,
-              background: g.ok ? 'transparent' : '#FFF5F5',
+              padding: '8px 12px',
+              borderBottom: `1px solid #FCA5A5`,
+              fontSize: 12,
+              fontWeight: 600,
+              color: '#991B1B',
             }}
           >
-            <div
-              className="flex-shrink-0"
-              style={{
-                width: 10,
-                height: 10,
-                borderRadius: '50%',
-                background: g.ok ? '#16A34A' : '#DC2626',
-              }}
-            />
-            <div className="flex-1 min-w-0">
-              <div
-                style={{
-                  fontSize: 13,
-                  fontWeight: 500,
-                  color: theme.textPrimary,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {label}
-              </div>
-              <div
-                style={{
-                  fontSize: 11,
-                  color: theme.textSecondary,
-                  marginTop: 1,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {g.composedAddress}
-              </div>
-              {!g.ok && g.reason && (
-                <div style={{ fontSize: 11, color: '#DC2626', marginTop: 3 }}>
-                  {g.reason}
-                </div>
-              )}
-            </div>
-            <div
-              className="tabular"
-              style={{
-                fontSize: 11,
-                color: g.ok ? '#16A34A' : '#DC2626',
-                fontWeight: 500,
-              }}
-            >
-              {g.ok ? `${Math.round(g.confidence * 100)}%` : '⚠'}
-            </div>
+            Unsuccessful / low-confidence ({issueCount}) · Keep as-is: {keptAsIsCount} · Remove:{' '}
+            {removedCount}
           </div>
-        );
-      })}
+          <div style={{ maxHeight: 280, overflowY: 'auto', padding: 8 }}>
+            {unsuccessful.map((g) => {
+              const row = rows[g.rowIndex];
+              if (!row) return null;
+              const label = renderLabel(labelTemplate, row, g.composedAddress);
+              const choice = unresolvedChoices[g.rowIndex] ?? {
+                action: 'keep',
+                editedAddress: g.composedAddress,
+              };
+              return (
+                <div
+                  key={g.rowIndex}
+                  style={{
+                    border: '1px solid #FCA5A5',
+                    borderRadius: 6,
+                    padding: '10px 12px',
+                    marginBottom: 8,
+                    background: '#fff',
+                  }}
+                >
+                  <div
+                    className="flex items-center justify-between gap-3"
+                    style={{ marginBottom: 6 }}
+                  >
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div
+                        style={{
+                          fontSize: 13,
+                          fontWeight: 500,
+                          color: theme.textPrimary,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        Row {g.rowIndex + 1} · {label}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 11,
+                          color: theme.textSecondary,
+                          marginTop: 1,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {g.composedAddress}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 11, color: '#DC2626', fontWeight: 600 }}>
+                      {g.status === 'low_confidence' ? 'Low confidence' : 'Failed'}
+                    </div>
+                  </div>
+                  {g.reason && (
+                    <div style={{ fontSize: 11, color: '#B91C1C', marginBottom: 8 }}>
+                      {g.reason}
+                    </div>
+                  )}
+                  <div className="flex flex-wrap items-center gap-3" style={{ marginBottom: 8 }}>
+                    <label
+                      className="flex items-center gap-1.5"
+                      style={{ fontSize: 12, color: theme.textSecondary }}
+                    >
+                      <input
+                        type="radio"
+                        name={`unresolved-${g.rowIndex}`}
+                        checked={choice.action === 'edit'}
+                        onChange={() =>
+                          updateChoice(g.rowIndex, (prev) => ({
+                            ...prev,
+                            action: 'edit',
+                            editedAddress: prev.editedAddress || g.composedAddress,
+                          }))
+                        }
+                      />
+                      Edit address
+                    </label>
+                    <label
+                      className="flex items-center gap-1.5"
+                      style={{ fontSize: 12, color: '#B91C1C' }}
+                    >
+                      <input
+                        type="radio"
+                        name={`unresolved-${g.rowIndex}`}
+                        checked={choice.action === 'remove'}
+                        onChange={() =>
+                          updateChoice(g.rowIndex, (prev) => ({
+                            ...prev,
+                            action: 'remove',
+                          }))
+                        }
+                      />
+                      Remove
+                    </label>
+                    <label
+                      className="flex items-center gap-1.5"
+                      style={{ fontSize: 12, color: theme.textSecondary }}
+                    >
+                      <input
+                        type="radio"
+                        name={`unresolved-${g.rowIndex}`}
+                        checked={choice.action === 'keep'}
+                        onChange={() =>
+                          updateChoice(g.rowIndex, (prev) => ({
+                            ...prev,
+                            action: 'keep',
+                          }))
+                        }
+                      />
+                      Keep as-is
+                    </label>
+                  </div>
+                  {choice.action === 'edit' && (
+                    <input
+                      value={choice.editedAddress}
+                      onChange={(e) =>
+                        updateChoice(g.rowIndex, (prev) => ({
+                          ...prev,
+                          editedAddress: e.target.value,
+                        }))
+                      }
+                      placeholder="Enter a corrected address"
+                      style={{
+                        width: '100%',
+                        padding: '7px 9px',
+                        fontSize: 12,
+                        border: `1px solid ${choice.editedAddress.trim() ? theme.border : '#DC2626'}`,
+                        borderRadius: 4,
+                        background: theme.inputBg,
+                        color: theme.textPrimary,
+                      }}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      <div style={{ border: `1px solid ${theme.border}`, borderRadius: 6, overflow: 'hidden' }}>
+        <div
+          style={{
+            padding: '8px 12px',
+            borderBottom: `1px solid ${theme.border}`,
+            fontSize: 12,
+            fontWeight: 600,
+            color: theme.textSecondary,
+            background: theme.sidebar,
+          }}
+        >
+          Geocoded successfully ({okCount})
+        </div>
+        {okCount === 0 && (
+          <div style={{ fontSize: 12, color: theme.textTertiary, padding: 12 }}>
+            No successful geocodes yet.
+          </div>
+        )}
+        {okCount > 0 && (
+          <div style={{ maxHeight: 220, overflowY: 'auto', padding: 8 }}>
+            {successful.map((g) => {
+              const row = rows[g.rowIndex];
+              if (!row) return null;
+              const label = renderLabel(labelTemplate, row, g.composedAddress);
+              return (
+                <div
+                  key={g.rowIndex}
+                  className="flex items-center gap-3"
+                  style={{
+                    padding: '8px 10px',
+                    marginBottom: 6,
+                    border: `1px solid ${theme.border}`,
+                    borderRadius: 6,
+                    background: 'transparent',
+                  }}
+                >
+                  <div
+                    className="flex-shrink-0"
+                    style={{
+                      width: 10,
+                      height: 10,
+                      borderRadius: '50%',
+                      background: '#16A34A',
+                    }}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 500,
+                        color: theme.textPrimary,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      Row {g.rowIndex + 1} · {label}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: theme.textSecondary,
+                        marginTop: 1,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {g.composedAddress}
+                    </div>
+                  </div>
+                  <div
+                    className="tabular"
+                    style={{
+                      fontSize: 11,
+                      color: '#16A34A',
+                      fontWeight: 500,
+                    }}
+                  >
+                    {Math.round(g.confidence * 100)}%
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
       <div style={{ fontSize: 11, color: theme.textTertiary, marginTop: 4 }}>
-        On "Save & Finish" the rest of the rows will be geocoded too.{' '}
-        Schema fields used: {schema.filter((c) => c.role.startsWith('address_')).map((c) => c.name).join(', ') || 'none'}
+        Reviewed {previewGeos.length} selected row{previewGeos.length === 1 ? '' : 's'}. Schema
+        fields used:{' '}
+        {schema
+          .filter((c) => c.role.startsWith('address_'))
+          .map((c) => c.name)
+          .join(', ') || 'none'}
       </div>
     </div>
   );
 }
 
-// ── Step 5: Save template ───────────────────────────────────────────────────
-function Step5Template({
+// ── Step 4: Save template ───────────────────────────────────────────────────
+function Step4Template({
   theme,
   templateName,
   setTemplateName,
@@ -1069,12 +1554,3 @@ function Step5Template({
   );
 }
 
-function codeChip(theme: ThemeTokens): React.CSSProperties {
-  return {
-    background: theme.hoverBg,
-    padding: '1px 4px',
-    borderRadius: 3,
-    fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-    fontSize: 12,
-  };
-}

@@ -213,6 +213,7 @@ function FilterRow({
     <div
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
+      onClick={() => onClick?.()}
       style={{
         padding: '5px 16px',
         cursor: onClick ? 'pointer' : 'default',
@@ -220,10 +221,7 @@ function FilterRow({
         transition: 'background 100ms',
       }}
     >
-      <div
-        className="flex items-center gap-2"
-        onClick={() => onClick?.()}
-      >
+      <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={(e) => {
