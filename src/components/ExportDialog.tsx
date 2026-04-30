@@ -1,11 +1,19 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   buildGoogleMapsLinks,
   buildPlainText,
   collectRoutePoints,
   safeFileName,
 } from '@/lib/googleMapsExport';
+import {
+  buildPdfColumnOptions,
+  buildRouteStopRows,
+  defaultSelectedPdfColumns,
+  resolvePdfCellValue,
+} from '@/lib/exportRouteData';
+import { exportRoutePdf } from '@/lib/pdfRouteExport';
 import { downloadProjectZip, downloadTextFile } from '@/lib/zip';
+import { RouteShareModal } from '@/components/RouteShareModal';
 import type { Project, ThemeTokens } from '@/types';
 
 interface ExportDialogProps {
@@ -16,6 +24,22 @@ interface ExportDialogProps {
 
 export function ExportDialog({ theme, project, onClose }: ExportDialogProps) {
   const [busy, setBusy] = useState(false);
+  const [copyStatusByRoute, setCopyStatusByRoute] = useState<Record<string, 'idle' | 'copied' | 'failed'>>({});
+  const [shareRoute, setShareRoute] = useState<{ routeName: string; url: string } | null>(null);
+  const pdfColumnOptions = useMemo(() => buildPdfColumnOptions(project), [project]);
+  const [selectedPdfColumnIds, setSelectedPdfColumnIds] = useState<string[]>(() =>
+    defaultSelectedPdfColumns(pdfColumnOptions),
+  );
+
+  useEffect(() => {
+    setSelectedPdfColumnIds((prev) => {
+      const available = new Set(pdfColumnOptions.map((option) => option.id));
+      const filtered = prev.filter((id) => available.has(id));
+      if (filtered.length > 0) return filtered;
+      return defaultSelectedPdfColumns(pdfColumnOptions);
+    });
+  }, [pdfColumnOptions]);
+
   const routesWithLinks = useMemo(
     () =>
       project.routes.map((route) => {
@@ -26,7 +50,8 @@ export function ExportDialog({ theme, project, onClose }: ExportDialogProps) {
           project.label_template,
         );
         const links = buildGoogleMapsLinks(points);
-        return { route, points, links };
+        const stopRows = buildRouteStopRows(project, route);
+        return { route, points, links, stopRows };
       }),
     [project],
   );
@@ -45,6 +70,53 @@ export function ExportDialog({ theme, project, onClose }: ExportDialogProps) {
 
   const openAllLinks = (links: { url: string }[]) => {
     links.forEach((l) => window.open(l.url, '_blank', 'noopener,noreferrer'));
+  };
+
+  const copyFirstLink = async (routeId: string, link: string): Promise<boolean> => {
+    const ok = await copyToClipboard(link);
+    setCopyStatusByRoute((prev) => ({ ...prev, [routeId]: ok ? 'copied' : 'failed' }));
+    window.setTimeout(() => {
+      setCopyStatusByRoute((prev) => ({ ...prev, [routeId]: 'idle' }));
+    }, 2000);
+    return ok;
+  };
+
+  const togglePdfColumn = (columnId: string, checked: boolean) => {
+    setSelectedPdfColumnIds((prev) => {
+      if (checked) return prev.includes(columnId) ? prev : [...prev, columnId];
+      return prev.filter((id) => id !== columnId);
+    });
+  };
+
+  const selectedPdfColumns = useMemo(() => {
+    const selected = new Set(selectedPdfColumnIds);
+    return pdfColumnOptions.filter((option) => selected.has(option.id));
+  }, [pdfColumnOptions, selectedPdfColumnIds]);
+  const previewRouteWithRows = useMemo(
+    () => routesWithLinks.find((entry) => entry.stopRows.length > 0),
+    [routesWithLinks],
+  );
+  const previewRow = previewRouteWithRows?.stopRows[0];
+
+  const exportRouteAsPdf = (
+    route: Project['routes'][number],
+    stopRows: ReturnType<typeof buildRouteStopRows>,
+  ) => {
+    if (selectedPdfColumns.length === 0) {
+      window.alert('Select at least one PDF field before exporting.');
+      return;
+    }
+    if (stopRows.length === 0) {
+      window.alert('This route has no stops to include in the PDF.');
+      return;
+    }
+
+    exportRoutePdf({
+      project,
+      route,
+      rows: stopRows,
+      columns: selectedPdfColumns,
+    });
   };
 
   const downloadRouteTxt = (routeName: string, text: string) => {
@@ -106,9 +178,94 @@ export function ExportDialog({ theme, project, onClose }: ExportDialogProps) {
               No routes yet. Create a route first.
             </div>
           )}
-          {routesWithLinks.map(({ route, points, links }) => {
+          {pdfColumnOptions.length > 0 && (
+            <div
+              style={{
+                border: `1px solid ${theme.border}`,
+                borderRadius: 8,
+                background: theme.inputBg,
+                padding: 12,
+                marginBottom: 12,
+              }}
+            >
+              <div style={{ fontSize: 13, fontWeight: 600, color: theme.textPrimary }}>PDF fields</div>
+              <div style={{ fontSize: 12, color: theme.textTertiary, marginTop: 2, marginBottom: 8 }}>
+                Stop number is always included. Choose what other columns appear in each route PDF.
+              </div>
+              <div className="flex flex-wrap gap-3">
+                {pdfColumnOptions.map((option) => (
+                  <label
+                    key={option.id}
+                    className="flex items-center gap-1 cursor-pointer"
+                    style={{ fontSize: 12, color: theme.textSecondary }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedPdfColumnIds.includes(option.id)}
+                      onChange={(event) => togglePdfColumn(option.id, event.target.checked)}
+                    />
+                    <span>{option.label}</span>
+                  </label>
+                ))}
+              </div>
+              <div
+                style={{
+                  marginTop: 10,
+                  border: `1px solid ${theme.border}`,
+                  borderRadius: 6,
+                  overflow: 'hidden',
+                }}
+              >
+                <div
+                  style={{
+                    padding: '6px 8px',
+                    fontSize: 11,
+                    color: theme.textTertiary,
+                    borderBottom: `1px solid ${theme.border}`,
+                    background: theme.chrome,
+                  }}
+                >
+                  Example PDF row
+                  {previewRouteWithRows ? ` • ${previewRouteWithRows.route.name}` : ''}
+                </div>
+                {!previewRow ? (
+                  <div style={{ padding: 8, fontSize: 12, color: theme.textTertiary }}>
+                    Add at least one stop to preview PDF output.
+                  </div>
+                ) : (
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', minWidth: 420, borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr>
+                          <th style={previewHeaderCell(theme)}>Stop #</th>
+                          {selectedPdfColumns.map((column) => (
+                            <th key={column.id} style={previewHeaderCell(theme)}>
+                              {column.label}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td style={previewBodyCell(theme, true)}>{previewRow.stopNumber}</td>
+                          {selectedPdfColumns.map((column) => (
+                            <td key={column.id} style={previewBodyCell(theme)}>
+                              {resolvePdfCellValue(column, previewRow)}
+                            </td>
+                          ))}
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          {routesWithLinks.map(({ route, points, links, stopRows }) => {
             const usable = points.length >= 2;
             const split = links.length > 1;
+            const primaryLink = links[0]?.url ?? '';
+            const copyStatus = copyStatusByRoute[route.id] ?? 'idle';
             return (
               <div
                 key={route.id}
@@ -167,11 +324,35 @@ export function ExportDialog({ theme, project, onClose }: ExportDialogProps) {
                     <div className="flex gap-2 flex-wrap">
                       <button
                         type="button"
-                        onClick={() => openAllLinks(links)}
+                        onClick={() => void copyFirstLink(route.id, primaryLink)}
                         style={primaryBtn(theme)}
+                        disabled={!primaryLink}
                       >
+                        {copyStatus === 'copied'
+                          ? 'Copied Maps link'
+                          : copyStatus === 'failed'
+                            ? 'Copy failed'
+                            : 'Copy Maps Link'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShareRoute({ routeName: route.name, url: primaryLink })}
+                        style={secondaryBtn(theme)}
+                        disabled={!primaryLink}
+                      >
+                        Show QR
+                      </button>
+                      <button type="button" onClick={() => openAllLinks(links)} style={secondaryBtn(theme)}>
                         Open in Google Maps
                         {split ? ` (${links.length} tabs)` : ''}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => exportRouteAsPdf(route, stopRows)}
+                        style={secondaryBtn(theme)}
+                        disabled={stopRows.length === 0}
+                      >
+                        Export Route as PDF
                       </button>
                       <button
                         type="button"
@@ -227,8 +408,45 @@ export function ExportDialog({ theme, project, onClose }: ExportDialogProps) {
           </div>
         </div>
       </div>
+      {shareRoute && (
+        <RouteShareModal
+          theme={theme}
+          routeName={shareRoute.routeName}
+          url={shareRoute.url}
+          onClose={() => setShareRoute(null)}
+          onCopyLink={(url) => copyToClipboard(url)}
+        />
+      )}
     </div>
   );
+}
+
+async function copyToClipboard(text: string): Promise<boolean> {
+  if (!text) return false;
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Continue to legacy fallback.
+  }
+
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return ok;
+  } catch {
+    return false;
+  }
 }
 
 function primaryBtn(theme: ThemeTokens): React.CSSProperties {
@@ -254,5 +472,34 @@ function secondaryBtn(theme: ThemeTokens): React.CSSProperties {
     border: `1px solid ${theme.border}`,
     borderRadius: 6,
     cursor: 'pointer',
+  };
+}
+
+function previewHeaderCell(theme: ThemeTokens): React.CSSProperties {
+  return {
+    textAlign: 'left',
+    padding: '6px 8px',
+    fontSize: 11,
+    fontWeight: 600,
+    color: theme.textPrimary,
+    background: theme.inputBg,
+    borderBottom: `1px solid ${theme.border}`,
+    borderRight: `1px solid ${theme.border}`,
+    whiteSpace: 'nowrap',
+  };
+}
+
+function previewBodyCell(theme: ThemeTokens, rightAlign = false): React.CSSProperties {
+  return {
+    padding: '6px 8px',
+    fontSize: 11,
+    color: theme.textSecondary,
+    borderBottom: `1px solid ${theme.border}`,
+    borderRight: `1px solid ${theme.border}`,
+    verticalAlign: 'top',
+    textAlign: rightAlign ? 'right' : 'left',
+    maxWidth: 220,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
   };
 }
