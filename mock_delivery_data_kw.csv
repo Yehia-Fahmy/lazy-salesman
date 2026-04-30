@@ -1,0 +1,21 @@
+first_name,last_name,address,city,province,phone,email,supply_type,delivery_frequency,avg_weekly_units,last_delivery_date,next_delivery_date,priority
+Aiden,Schultz,215 King St W,Kitchener,ON,519-208-4412,aiden.schultz@examplemail.ca,Office Paper Cases,Weekly,18,2026-04-24,2026-05-01,High
+Maya,D'Souza,87 Victoria St N,Kitchener,ON,519-743-1198,maya.dsouza@examplemail.ca,Cleaning Chemicals,Biweekly,9,2026-04-17,2026-05-01,Medium
+Liam,Fernandes,402 Weber St E,Kitchener,ON,226-312-9074,liam.fernandes@examplemail.ca,Disposable Gloves,Weekly,26,2026-04-23,2026-04-30,High
+Chloe,Nguyen,61 Charles St W,Kitchener,ON,519-580-6621,chloe.nguyen@examplemail.ca,Coffee Supplies,Biweekly,7,2026-04-18,2026-05-02,Low
+Noah,MacLeod,129 Highland Rd W,Kitchener,ON,548-995-2306,noah.macleod@examplemail.ca,Printer Toner,Monthly,4,2026-04-10,2026-05-10,Medium
+Sofia,Patel,318 Fairway Rd S,Kitchener,ON,519-215-7784,sofia.patel@examplemail.ca,Breakroom Snacks,Weekly,14,2026-04-22,2026-04-29,Medium
+Ethan,Reinhardt,540 Belmont Ave W,Kitchener,ON,226-476-5052,ethan.reinhardt@examplemail.ca,Shipping Boxes,Weekly,21,2026-04-24,2026-05-01,High
+Ava,Chowdhury,44 Ottawa St S,Kitchener,ON,519-954-3817,ava.chowdhury@examplemail.ca,Hand Sanitizer,Biweekly,11,2026-04-19,2026-05-03,Medium
+Lucas,Tremblay,172 Bridgeport Rd E,Waterloo,ON,519-884-6325,lucas.tremblay@examplemail.ca,Latex Gloves,Weekly,19,2026-04-25,2026-05-02,High
+Emma,Khan,95 University Ave W,Waterloo,ON,226-600-1473,emma.khan@examplemail.ca,Lab Wipes,Biweekly,8,2026-04-16,2026-04-30,Medium
+Benjamin,Rossi,311 Albert St,Waterloo,ON,519-590-9246,benjamin.rossi@examplemail.ca,Packaging Tape,Weekly,13,2026-04-23,2026-04-30,Low
+Isla,Haddad,76 Erb St W,Waterloo,ON,548-301-7750,isla.haddad@examplemail.ca,Janitorial Supplies,Weekly,16,2026-04-24,2026-05-01,High
+Mason,Li,205 Northfield Dr E,Waterloo,ON,519-722-4039,mason.li@examplemail.ca,Printer Paper Reams,Biweekly,10,2026-04-15,2026-04-29,Medium
+Harper,O'Connell,14 King St S,Waterloo,ON,226-748-2180,harper.oconnell@examplemail.ca,Bottled Water Cases,Weekly,24,2026-04-22,2026-04-29,High
+Elijah,Silva,623 Columbia St W,Waterloo,ON,519-498-8664,elijah.silva@examplemail.ca,Floor Cleaner,Monthly,5,2026-04-08,2026-05-08,Low
+Amelia,Ahmed,251 Lexington Rd,Waterloo,ON,548-772-5193,amelia.ahmed@examplemail.ca,Kitchen Towels,Biweekly,12,2026-04-20,2026-05-04,Medium
+James,Petrov,48 Hespeler Rd,Cambridge,ON,519-621-3379,james.petrov@examplemail.ca,Pallet Wrap,Weekly,20,2026-04-24,2026-05-01,High
+Layla,Bouchard,390 Dundas St N,Cambridge,ON,226-338-0421,layla.bouchard@examplemail.ca,Disinfectant Spray,Biweekly,9,2026-04-17,2026-05-01,Medium
+Henry,Campbell,112 Water St N,Cambridge,ON,519-986-2548,henry.campbell@examplemail.ca,Shipping Labels,Weekly,15,2026-04-23,2026-04-30,Medium
+Aria,Velasquez,266 Franklin Blvd,Cambridge,ON,548-640-7192,aria.velasquez@examplemail.ca,Safety Masks,Biweekly,11,2026-04-18,2026-05-02,High

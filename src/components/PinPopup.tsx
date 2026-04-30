@@ -15,6 +15,7 @@ interface PinPopupProps {
   onDeleteStop: (stopId: string) => void;
   onEditStop: (stopId: string) => void;
   onClose: () => void;
+  previewMode?: boolean;
 }
 
 export function PinPopup({
@@ -29,6 +30,7 @@ export function PinPopup({
   onDeleteStop,
   onEditStop,
   onClose,
+  previewMode = false,
 }: PinPopupProps) {
   const [showSensitive, setShowSensitive] = useState(false);
   const label = stopLabel(stop, labelTemplate);
@@ -52,23 +54,25 @@ export function PinPopup({
       <div style={{ padding: '12px 14px 10px', borderBottom: `1px solid ${theme.border}` }}>
         <div className="flex justify-between items-start">
           <div style={{ fontWeight: 600, fontSize: 14, lineHeight: 1.3 }}>{label}</div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            style={{
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-              color: theme.textTertiary,
-              fontSize: 18,
-              padding: 0,
-              marginLeft: 8,
-              lineHeight: 1,
-            }}
-          >
-            ×
-          </button>
+          {!previewMode && (
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              style={{
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                color: theme.textTertiary,
+                fontSize: 18,
+                padding: 0,
+                marginLeft: 8,
+                lineHeight: 1,
+              }}
+            >
+              ×
+            </button>
+          )}
         </div>
         <div
           style={{
@@ -190,7 +194,7 @@ export function PinPopup({
         </div>
       )}
 
-      <div style={{ padding: '10px 14px' }}>
+      {!previewMode && <div style={{ padding: '10px 14px' }}>
         <div
           style={{
             fontSize: 11,
@@ -311,7 +315,7 @@ export function PinPopup({
             Delete
           </button>
         </div>
-      </div>
+      </div>}
     </div>
   );
 }
