@@ -423,6 +423,7 @@ export function App() {
                   }
                   onReorder={(stop_ids) => reorderRouteStops(activeRoute.id, stop_ids)}
                   onRemoveStop={(stopId) => toggleStopInRoute(activeRoute.id, stopId)}
+                  onStopClick={handleSidebarStopClick}
                   onDone={() => setActiveRouteId(null)}
                   onDelete={handleDeleteRoute}
                 />

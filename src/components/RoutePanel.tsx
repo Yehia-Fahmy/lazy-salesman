@@ -28,6 +28,7 @@ interface RoutePanelProps {
   onToggleLoop: () => void;
   onReorder: (stopIds: string[]) => void;
   onRemoveStop: (stopId: string) => void;
+  onStopClick: (stopId: string) => void;
   onDone: () => void;
   onDelete: () => void;
 }
@@ -44,6 +45,7 @@ export function RoutePanel({
   onToggleLoop,
   onReorder,
   onRemoveStop,
+  onStopClick,
   onDone,
   onDelete,
 }: RoutePanelProps) {
@@ -134,7 +136,9 @@ export function RoutePanel({
                   id={stop.id}
                   index={i + 1}
                   label={stopLabel(stop, labelTemplate)}
+                  address={stop.composed_address}
                   onRemove={() => onRemoveStop(stop.id)}
+                  onClick={() => onStopClick(stop.id)}
                   theme={theme}
                 />
               ))}
@@ -288,11 +292,13 @@ interface SortableRowProps {
   id: string;
   index: number;
   label: string;
+  address: string;
   onRemove: () => void;
+  onClick: () => void;
   theme: ThemeTokens;
 }
 
-function SortableRow({ id, index, label, onRemove, theme }: SortableRowProps) {
+function SortableRow({ id, index, label, address, onRemove, onClick, theme }: SortableRowProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id });
   const style: React.CSSProperties = {
@@ -303,7 +309,7 @@ function SortableRow({ id, index, label, onRemove, theme }: SortableRowProps) {
     display: 'flex',
     alignItems: 'center',
     gap: 6,
-    padding: '5px 16px',
+    padding: '6px 16px',
     cursor: 'grab',
     userSelect: 'none',
   };
@@ -322,18 +328,57 @@ function SortableRow({ id, index, label, onRemove, theme }: SortableRowProps) {
       >
         {index}
       </span>
-      <span
+      {/* Title + address: clicking opens the stop's PinPopup. The pointer
+          sensor uses an activation distance, so a stationary click doesn't
+          start a drag — letting the click pass through here is enough. */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={(e) => {
+          e.stopPropagation();
+          onClick();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            e.stopPropagation();
+            onClick();
+          }
+        }}
         style={{
-          fontSize: 12,
-          color: theme.textPrimary,
           flex: 1,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
+          minWidth: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 1,
+          cursor: 'pointer',
         }}
       >
-        {label}
-      </span>
+        <span
+          style={{
+            fontSize: 12,
+            color: theme.textPrimary,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {label}
+        </span>
+        {address && (
+          <span
+            style={{
+              fontSize: 10,
+              color: theme.textTertiary,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {address}
+          </span>
+        )}
+      </div>
       <button
         type="button"
         onClick={(e) => {
