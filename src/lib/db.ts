@@ -1,4 +1,5 @@
 import Dexie, { type Table } from 'dexie';
+import type { GeocodeErrorDetails } from '@/lib/mapbox';
 import type { ImportTemplate, Project } from '@/types';
 
 export interface GeocodeCacheRow {
@@ -9,6 +10,7 @@ export interface GeocodeCacheRow {
   status: 'ok' | 'low_confidence' | 'failed';
   reason?: string;
   resolved_address?: string;
+  details?: GeocodeErrorDetails;
   cached_at: string;
 }
 

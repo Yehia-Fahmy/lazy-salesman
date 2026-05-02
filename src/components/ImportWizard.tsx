@@ -9,6 +9,7 @@ import {
 import { defaultLabelTemplate, renderLabel } from '@/lib/labelTemplate';
 import { db } from '@/lib/db';
 import { geocodeWithCache } from '@/lib/geocodeCache';
+import type { GeocodeErrorDetails } from '@/lib/mapbox';
 import { useProjectStore } from '@/store/useProjectStore';
 import { PinPopup } from '@/components/PinPopup';
 import type { ColumnDef, ColumnRole, ImportTemplate, Stop, ThemeTokens } from '@/types';
@@ -48,6 +49,7 @@ interface PreviewGeo {
   confidence: number;
   composedAddress: string;
   reason?: string;
+  details?: GeocodeErrorDetails;
   lat: number;
   lng: number;
 }
@@ -166,6 +168,7 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
             confidence: r.confidence,
             composedAddress: addr,
             ...(r.reason !== undefined ? { reason: r.reason } : {}),
+            ...(r.details !== undefined ? { details: r.details } : {}),
             lat: r.lat,
             lng: r.lng,
           });
@@ -233,6 +236,7 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
               confidence: r.confidence,
               composedAddress: editedAddress,
               ...(r.reason !== undefined ? { reason: r.reason } : {}),
+              ...(r.details !== undefined ? { details: r.details } : {}),
               lat: r.lat,
               lng: r.lng,
             };
@@ -261,6 +265,7 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
               confidence: r.confidence,
               composedAddress: addr,
               ...(r.reason !== undefined ? { reason: r.reason } : {}),
+              ...(r.details !== undefined ? { details: r.details } : {}),
               lat: r.lat,
               lng: r.lng,
             };
@@ -1175,6 +1180,15 @@ function Step3Preview({
   unresolvedChoices: Record<number, UnresolvedChoice>;
   onUnresolvedChoicesChange: (next: Record<number, UnresolvedChoice>) => void;
 }) {
+  const [expandedDetails, setExpandedDetails] = useState<Set<number>>(new Set());
+  const toggleDetails = (rowIndex: number) => {
+    setExpandedDetails((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowIndex)) next.delete(rowIndex);
+      else next.add(rowIndex);
+      return next;
+    });
+  };
   if (geocoding || !previewGeos) {
     return (
       <div className="text-center" style={{ padding: '40px 0' }}>
@@ -1300,9 +1314,53 @@ function Step3Preview({
                       {g.status === 'low_confidence' ? 'Low confidence' : 'Failed'}
                     </div>
                   </div>
-                  {g.reason && (
-                    <div style={{ fontSize: 11, color: '#B91C1C', marginBottom: 8 }}>
-                      {g.reason}
+                  {(g.reason || g.details) && (
+                    <div style={{ marginBottom: 8 }}>
+                      <div
+                        className="flex items-center gap-2"
+                        style={{ fontSize: 11, color: '#B91C1C' }}
+                      >
+                        <span>{g.reason}</span>
+                        {g.details && (
+                          <button
+                            type="button"
+                            onClick={() => toggleDetails(g.rowIndex)}
+                            style={{
+                              fontSize: 11,
+                              color: '#B91C1C',
+                              textDecoration: 'underline',
+                              background: 'none',
+                              border: 'none',
+                              padding: 0,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            {expandedDetails.has(g.rowIndex) ? 'Hide details' : 'View details'}
+                          </button>
+                        )}
+                      </div>
+                      {g.details && expandedDetails.has(g.rowIndex) && (
+                        <pre
+                          style={{
+                            marginTop: 6,
+                            padding: '8px 10px',
+                            fontSize: 10,
+                            lineHeight: 1.45,
+                            background: '#FEF2F2',
+                            border: '1px solid #FCA5A5',
+                            borderRadius: 4,
+                            color: '#7F1D1D',
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            maxHeight: 180,
+                            overflowY: 'auto',
+                            fontFamily:
+                              'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                          }}
+                        >
+                          {formatGeocodeDetails(g.details)}
+                        </pre>
+                      )}
                     </div>
                   )}
                   <div className="flex flex-wrap items-center gap-3" style={{ marginBottom: 8 }}>
@@ -1552,5 +1610,37 @@ function Step4Template({
       </div>
     </div>
   );
+}
+
+function formatGeocodeDetails(details: GeocodeErrorDetails): string {
+  const lines: string[] = [];
+  switch (details.type) {
+    case 'http': {
+      lines.push(`HTTP ${details.status}${details.statusText ? ' ' + details.statusText : ''}`);
+      lines.push(`URL: ${details.url}`);
+      lines.push('');
+      lines.push('Response body:');
+      lines.push(details.body || '(empty)');
+      break;
+    }
+    case 'network': {
+      lines.push('Network error — request did not complete.');
+      lines.push(`URL: ${details.url}`);
+      lines.push('');
+      lines.push(`Message: ${details.message || '(none)'}`);
+      break;
+    }
+    case 'no_result': {
+      lines.push('Mapbox returned 200 OK but with no features.');
+      lines.push(`URL: ${details.url}`);
+      break;
+    }
+    case 'empty_address': {
+      lines.push('No request was sent — the composed address was empty.');
+      lines.push('Check that at least one address column is mapped and that the row has values.');
+      break;
+    }
+  }
+  return lines.join('\n');
 }
 

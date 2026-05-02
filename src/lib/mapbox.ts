@@ -3,6 +3,12 @@ import type { GeocodeStatus } from '@/types';
 const GEOCODE_BASE = 'https://api.mapbox.com/geocoding/v5/mapbox.places';
 const DIRECTIONS_BASE = 'https://api.mapbox.com/directions/v5/mapbox/driving';
 
+export type GeocodeErrorDetails =
+  | { type: 'http'; status: number; statusText: string; body: string; url: string }
+  | { type: 'network'; message: string; url: string }
+  | { type: 'no_result'; url: string }
+  | { type: 'empty_address' };
+
 export interface GeocodeResult {
   lat: number;
   lng: number;
@@ -10,6 +16,11 @@ export interface GeocodeResult {
   status: GeocodeStatus;
   reason?: string;
   resolvedAddress: string;
+  details?: GeocodeErrorDetails;
+}
+
+function redactToken(url: string): string {
+  return url.replace(/access_token=[^&]+/, 'access_token=***');
 }
 
 const LOW_CONFIDENCE_THRESHOLD = 0.7;
@@ -32,9 +43,11 @@ export async function geocode(address: string, token: string): Promise<GeocodeRe
       status: 'failed',
       reason: 'Empty address — no address columns mapped or all values blank.',
       resolvedAddress: '',
+      details: { type: 'empty_address' },
     };
   }
   const url = `${GEOCODE_BASE}/${encodeURIComponent(address)}.json?limit=1&access_token=${encodeURIComponent(token)}`;
+  const safeUrl = redactToken(url);
   let res: Response;
   try {
     res = await fetch(url);
@@ -46,9 +59,20 @@ export async function geocode(address: string, token: string): Promise<GeocodeRe
       status: 'failed',
       reason: 'Network error contacting Mapbox.',
       resolvedAddress: '',
+      details: {
+        type: 'network',
+        message: err instanceof Error ? err.message : String(err),
+        url: safeUrl,
+      },
     };
   }
   if (!res.ok) {
+    let body = '';
+    try {
+      body = await res.text();
+    } catch {
+      body = '';
+    }
     return {
       lat: 0,
       lng: 0,
@@ -56,6 +80,13 @@ export async function geocode(address: string, token: string): Promise<GeocodeRe
       status: 'failed',
       reason: `Mapbox geocoding error ${res.status}`,
       resolvedAddress: '',
+      details: {
+        type: 'http',
+        status: res.status,
+        statusText: res.statusText,
+        body,
+        url: safeUrl,
+      },
     };
   }
   const json = (await res.json()) as { features?: MapboxFeature[] };
@@ -68,6 +99,7 @@ export async function geocode(address: string, token: string): Promise<GeocodeRe
       status: 'failed',
       reason: 'No geocoding result returned.',
       resolvedAddress: '',
+      details: { type: 'no_result', url: safeUrl },
     };
   }
   const [lng, lat] = feat.center;

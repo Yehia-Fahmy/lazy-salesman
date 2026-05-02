@@ -9,6 +9,7 @@ import {
   importJsonFile,
 } from '@/lib/jsonExport';
 import { resetCurrentProject } from '@/lib/projectPersistence';
+import { db } from '@/lib/db';
 
 interface SettingsProps {
   theme: ThemeTokens;
@@ -84,6 +85,29 @@ export function Settings({
       setVisibleRoutes(new Set(['unassigned']));
       setIo({ kind: 'ok', label: 'Project cleared.' });
       onClose();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setIo({ kind: 'error', label: msg });
+    }
+  };
+
+  const handleClearGeocodeCache = async () => {
+    const count = await db.geocodeCache.count();
+    if (count === 0) {
+      setIo({ kind: 'ok', label: 'Geocode cache is already empty.' });
+      return;
+    }
+    const ok = confirm(
+      `Clear ${count} cached geocode${count === 1 ? '' : 's'}? Future imports will re-fetch every address from Mapbox.`,
+    );
+    if (!ok) return;
+    setIo({ kind: 'busy', label: 'Clearing cache…' });
+    try {
+      await db.geocodeCache.clear();
+      setIo({
+        kind: 'ok',
+        label: `Cleared ${count} cached geocode${count === 1 ? '' : 's'}.`,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setIo({ kind: 'error', label: msg });
@@ -225,6 +249,30 @@ export function Settings({
                 </button>
               ))}
             </div>
+          </div>
+
+          <div style={{ marginTop: 24 }}>
+            <SectionTitle theme={theme}>Geocode cache</SectionTitle>
+            <div
+              style={{
+                fontSize: 12,
+                color: theme.textSecondary,
+                marginBottom: 10,
+                lineHeight: 1.5,
+              }}
+            >
+              Successful geocodes are cached locally to keep re-imports fast and avoid
+              repeat Mapbox calls. Clear the cache to force every address to be
+              re-fetched on the next import.
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleClearGeocodeCache()}
+              disabled={io.kind === 'busy'}
+              style={btnStyle(theme, false, io.kind === 'busy')}
+            >
+              Clear geocode cache
+            </button>
           </div>
 
           <div style={{ marginTop: 24 }}>
