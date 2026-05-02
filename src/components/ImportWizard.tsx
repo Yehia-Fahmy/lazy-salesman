@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   autoDetectRoles,
   buildComposedAddress,
@@ -84,6 +84,7 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
   const [labelTemplate, setLabelTemplate] = useState('');
   const [previewGeos, setPreviewGeos] = useState<PreviewGeo[] | null>(null);
   const [unresolvedChoices, setUnresolvedChoices] = useState<Record<number, UnresolvedChoice>>({});
+  const [retryingRows, setRetryingRows] = useState<Set<number>>(new Set());
   const [geocoding, setGeocoding] = useState(false);
   const [previewStarted, setPreviewStarted] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -140,6 +141,7 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
 
   useEffect(() => {
     setUnresolvedChoices({});
+    setRetryingRows(new Set());
   }, [step, selectedRowIndices, selectedSchema]);
 
   // Geocode preview when entering step 3
@@ -197,6 +199,91 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
       setGeocoding(false);
     }
   }, [rows, step, previewStarted, selectedRowList, selectedSchema, token]);
+
+  // Re-geocode a single row, bypassing the cache in both directions so a
+  // transient failure (e.g. a 403 caused by an out-of-band token issue) is
+  // never written to IndexedDB and a cached low-confidence row genuinely
+  // hits Mapbox again.
+  const retryRow = useCallback(
+    async (rowIndex: number): Promise<void> => {
+      const existing = previewGeos?.find((g) => g.rowIndex === rowIndex);
+      if (!existing) return;
+      const choice = unresolvedChoices[rowIndex];
+      const editedAddress =
+        choice?.action === 'edit' ? choice.editedAddress.trim() : '';
+      const addr = editedAddress || existing.composedAddress;
+
+      setRetryingRows((prev) => {
+        if (prev.has(rowIndex)) return prev;
+        const next = new Set(prev);
+        next.add(rowIndex);
+        return next;
+      });
+
+      let nextEntry: PreviewGeo;
+      try {
+        const r = await geocodeWithCache(addr, token, {
+          bypassCache: true,
+          noCache: true,
+        });
+        nextEntry = {
+          rowIndex,
+          ok: r.status === 'ok',
+          status: r.status,
+          confidence: r.confidence,
+          composedAddress: addr,
+          ...(r.reason !== undefined ? { reason: r.reason } : {}),
+          ...(r.details !== undefined ? { details: r.details } : {}),
+          lat: r.lat,
+          lng: r.lng,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        nextEntry = {
+          rowIndex,
+          ok: false,
+          status: 'failed',
+          confidence: 0,
+          composedAddress: addr,
+          reason: msg,
+          lat: 0,
+          lng: 0,
+        };
+      }
+
+      setPreviewGeos((prev) =>
+        prev ? prev.map((g) => (g.rowIndex === rowIndex ? nextEntry : g)) : prev,
+      );
+      // If the retry succeeded, drop the row from the unresolved-choices map
+      // so it disappears from the "needs attention" section and stops being
+      // counted as kept/removed.
+      if (nextEntry.status === 'ok') {
+        setUnresolvedChoices((prev) => {
+          if (!(rowIndex in prev)) return prev;
+          const next = { ...prev };
+          delete next[rowIndex];
+          return next;
+        });
+      }
+      setRetryingRows((prev) => {
+        if (!prev.has(rowIndex)) return prev;
+        const next = new Set(prev);
+        next.delete(rowIndex);
+        return next;
+      });
+    },
+    [previewGeos, unresolvedChoices, token],
+  );
+
+  const retryAllFailed = useCallback(async (): Promise<void> => {
+    if (!previewGeos) return;
+    const targets = previewGeos
+      .filter((g) => g.status !== 'ok')
+      .map((g) => g.rowIndex);
+    for (const rowIndex of targets) {
+      await retryRow(rowIndex);
+    }
+  }, [previewGeos, retryRow]);
 
   const finalize = async (alsoSaveTemplate: boolean): Promise<void> => {
     setImporting(true);
@@ -495,6 +582,9 @@ export function ImportWizard({ theme, file, token, onClose }: ImportWizardProps)
               rows={rows}
               unresolvedChoices={unresolvedChoices}
               onUnresolvedChoicesChange={setUnresolvedChoices}
+              retryingRows={retryingRows}
+              onRetryRow={retryRow}
+              onRetryAllFailed={retryAllFailed}
             />
           )}
           {!parseError && step === 4 && (
@@ -1169,6 +1259,9 @@ function Step3Preview({
   rows,
   unresolvedChoices,
   onUnresolvedChoicesChange,
+  retryingRows,
+  onRetryRow,
+  onRetryAllFailed,
 }: {
   theme: ThemeTokens;
   previewRowCount: number;
@@ -1179,6 +1272,9 @@ function Step3Preview({
   rows: Record<string, string>[];
   unresolvedChoices: Record<number, UnresolvedChoice>;
   onUnresolvedChoicesChange: (next: Record<number, UnresolvedChoice>) => void;
+  retryingRows: Set<number>;
+  onRetryRow: (rowIndex: number) => void;
+  onRetryAllFailed: () => void;
 }) {
   const [expandedDetails, setExpandedDetails] = useState<Set<number>>(new Set());
   const toggleDetails = (rowIndex: number) => {
@@ -1249,6 +1345,7 @@ function Step3Preview({
           }}
         >
           <div
+            className="flex items-center justify-between gap-3"
             style={{
               padding: '8px 12px',
               borderBottom: `1px solid #FCA5A5`,
@@ -1257,8 +1354,30 @@ function Step3Preview({
               color: '#991B1B',
             }}
           >
-            Unsuccessful / low-confidence ({issueCount}) · Keep as-is: {keptAsIsCount} · Remove:{' '}
-            {removedCount}
+            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              Unsuccessful / low-confidence ({issueCount}) · Keep as-is: {keptAsIsCount} ·
+              Remove: {removedCount}
+            </span>
+            <button
+              type="button"
+              onClick={onRetryAllFailed}
+              disabled={retryingRows.size > 0}
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: '#B91C1C',
+                background: '#fff',
+                border: '1px solid #FCA5A5',
+                borderRadius: 4,
+                padding: '4px 10px',
+                cursor: retryingRows.size > 0 ? 'not-allowed' : 'pointer',
+                opacity: retryingRows.size > 0 ? 0.6 : 1,
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
+              }}
+            >
+              {retryingRows.size > 0 ? 'Retrying…' : 'Retry all failed'}
+            </button>
           </div>
           <div style={{ maxHeight: 280, overflowY: 'auto', padding: 8 }}>
             {unsuccessful.map((g) => {
@@ -1310,8 +1429,32 @@ function Step3Preview({
                         {g.composedAddress}
                       </div>
                     </div>
-                    <div style={{ fontSize: 11, color: '#DC2626', fontWeight: 600 }}>
-                      {g.status === 'low_confidence' ? 'Low confidence' : 'Failed'}
+                    <div
+                      className="flex items-center gap-2"
+                      style={{ flexShrink: 0 }}
+                    >
+                      <span style={{ fontSize: 11, color: '#DC2626', fontWeight: 600 }}>
+                        {g.status === 'low_confidence' ? 'Low confidence' : 'Failed'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onRetryRow(g.rowIndex)}
+                        disabled={retryingRows.has(g.rowIndex)}
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 600,
+                          color: '#B91C1C',
+                          background: '#fff',
+                          border: '1px solid #FCA5A5',
+                          borderRadius: 4,
+                          padding: '3px 8px',
+                          cursor: retryingRows.has(g.rowIndex) ? 'not-allowed' : 'pointer',
+                          opacity: retryingRows.has(g.rowIndex) ? 0.6 : 1,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {retryingRows.has(g.rowIndex) ? 'Retrying…' : 'Retry'}
+                      </button>
                     </div>
                   </div>
                   {(g.reason || g.details) && (
