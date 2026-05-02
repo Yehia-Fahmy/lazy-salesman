@@ -68,6 +68,39 @@ export function ExportDialog({ theme, project, onClose }: ExportDialogProps) {
     }
   };
 
+  // Trigger one PDF download per route that has stops. We validate the column
+  // selection and the existence of routes with stops up-front (rather than per
+  // route inside the loop) so the user only sees a single alert and never gets
+  // a half-completed batch.
+  const exportAllAsPdf = async () => {
+    if (selectedPdfColumns.length === 0) {
+      window.alert('Select at least one PDF field before exporting.');
+      return;
+    }
+    const targets = routesWithLinks.filter((entry) => entry.stopRows.length > 0);
+    if (targets.length === 0) {
+      window.alert('No routes have stops to export.');
+      return;
+    }
+    setBusy(true);
+    try {
+      for (const { route, stopRows } of targets) {
+        exportRoutePdf({
+          project,
+          route,
+          rows: stopRows,
+          columns: selectedPdfColumns,
+        });
+        // Yield to the browser between saves so each download is registered
+        // separately. Without this, some browsers drop later downloads when
+        // many fire in the same tick.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const openAllLinks = (links: { url: string }[]) => {
     links.forEach((l) => window.open(l.url, '_blank', 'noopener,noreferrer'));
   };
@@ -386,6 +419,28 @@ export function ExportDialog({ theme, project, onClose }: ExportDialogProps) {
               style={secondaryBtn(theme)}
             >
               Close
+            </button>
+            <button
+              type="button"
+              onClick={() => void exportAllAsPdf()}
+              disabled={busy || routesWithLinks.every((r) => r.stopRows.length === 0)}
+              style={{
+                padding: '8px 16px',
+                fontSize: 13,
+                fontWeight: 600,
+                color: theme.accent,
+                background: theme.inputBg,
+                border: `1px solid ${theme.accent}`,
+                borderRadius: 6,
+                cursor:
+                  busy || routesWithLinks.every((r) => r.stopRows.length === 0)
+                    ? 'not-allowed'
+                    : 'pointer',
+                opacity:
+                  busy || routesWithLinks.every((r) => r.stopRows.length === 0) ? 0.6 : 1,
+              }}
+            >
+              {busy ? 'Exporting…' : 'Export all as PDF'}
             </button>
             <button
               type="button"
